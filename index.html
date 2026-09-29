@@ -18,6 +18,8 @@
     --rule: #d3d8cd;
     --felt: #23704f;
     --felt-hi: #2a7a57;
+    --felt-legal: #3a9467;
+    --felt-legal-hi: #46a674;
     --line: #174a34;
     --frame: #4a3322;
     --frame-ink: #e9d9c3;
@@ -42,6 +44,8 @@
       --rule: #29322c;
       --felt: #1d5c41;
       --felt-hi: #226549;
+      --felt-legal: #2c7a55;
+      --felt-legal-hi: #358a61;
       --line: #103726;
       --frame: #2c1f15;
       --frame-ink: #c9b79d;
@@ -61,6 +65,8 @@
     --rule: #29322c;
     --felt: #1d5c41;
     --felt-hi: #226549;
+    --felt-legal: #2c7a55;
+    --felt-legal-hi: #358a61;
     --line: #103726;
     --frame: #2c1f15;
     --frame-ink: #c9b79d;
@@ -144,8 +150,8 @@
     place-items: center;
     cursor: default;
   }
-  .cell.legal { cursor: pointer; }
-  .cell.legal:hover { background: var(--felt-hi); }
+  .cell.legal { cursor: pointer; background: var(--felt-legal); }
+  .cell.legal:hover { background: var(--felt-legal-hi); }
   .cell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1; }
   .star {
     position: absolute; width: 6px; height: 6px; border-radius: 50%;
