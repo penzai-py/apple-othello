@@ -233,6 +233,8 @@
   .btn:focus-visible, .toggle input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
   .toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; }
   .toggle input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+  .select { font-size: 13px; padding: 4px 8px; }
+  .select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
   .log {
@@ -261,7 +263,7 @@
 <div class="wrap">
   <header>
     <h1>苹果翻转棋</h1>
-    <span class="tag">AI 每步只看一眼：161 万参数的网络估算每个落点的胜率，不做搜索</span>
+    <span class="tag">161 万参数的网络估算每个落点的胜率，AI 在此之上往前搜索，默认 3 层</span>
   </header>
 
   <div class="game">
@@ -294,6 +296,13 @@
         <div class="row">
           <button class="btn" id="undo" type="button">悔棋</button>
         </div>
+        <label class="toggle">AI 搜索深度
+          <select class="btn select" id="depth">
+            <option value="1">1 层 · 只看网络，最快</option>
+            <option value="2">2 层</option>
+            <option value="3">3 层 · 最强</option>
+          </select>
+        </label>
         <label class="toggle"><input type="checkbox" id="owner" checked><span>显示终局归属判断</span></label>
         <label class="toggle"><input type="checkbox" id="hints" checked><span>显示 AI 对你每个落点的胜率估计</span></label>
       </div>
@@ -308,8 +317,11 @@
 
   <section class="about">
     <p><b>它是怎么学会的。</b>KataGo 式的残差卷积网络，带全局池化，从随机权重开始只靠自己和自己下棋学习。先在剩 10 个空格起用精确求解器给出完美对弈的胜负，把它作为这盘棋每一步的标签，训练到不再进步；再改用时序差分，让每个落点的标签等于对手最好应对之后的胜率，一直训练到测试集上的误差不再下降。</p>
-    <p><b>屏幕上的数字。</b>胜率条是 AI 对当前局面双方胜率的估计。每格上的小方块是它对这一格"终局时归谁"的判断：黑方块归黑，白方块归白，越不透明越确定（叠在棋子上的方块颜色和棋子不同，就是它认为这颗子会被翻过去）；把 64 格的判断加起来，就是预计的终局子差。落点提示是"在这里落子后你的胜率"，金色是它认为最好的一步。AI 自己就是永远选胜率最高的那一步。</p>
+    <p><b>屏幕上的数字。</b>胜率条是 AI 对当前局面双方胜率的估计。每格上的小方块是它对这一格"终局时归谁"的判断：黑方块归黑，白方块归白，越不透明越确定（叠在棋子上的方块颜色和棋子不同，就是它认为这颗子会被翻过去）；把 64 格的判断加起来，就是预计的终局子差。落点提示是"在这里落子后你的胜率"，金色是它认为最好的一步。这些都是网络直接看一眼（1 层）的判断。</p>
+    <p><b>AI 怎么走棋。</b>网络本身已经会估计"走这一步之后的胜率"，这是 1 层。3 层就是把自己的每一步、对手的每一种应对都摆出来，再让网络估计自己下一步的胜率，按双方都选最好的一步倒推回来，选胜率最高的一步（alpha-beta 剪枝，每步约 30 次网络评估）。成绩表里其余几项是只看 1 层时的。</p>
     <div class="stats" aria-label="AI 的对局成绩">
+      <span>3 层对只看 1 层的自己</span><span>86%</span>
+      <span>2 层对只看 1 层的自己</span><span>76%</span>
       <span>对 4 层 alpha-beta 搜索</span><span>81%</span>
       <span>对 2 层 alpha-beta 搜索</span><span>96%</span>
       <span>对"每步翻子最多"策略</span><span>69%</span>
@@ -319,7 +331,7 @@
   </section>
 </div>
 
-<script>// Othello rules + KataGo-style net forward pass (BatchNorm already folded into the convs, weights in fp16).
+<script id="engine-js">// Othello rules + KataGo-style net forward pass (BatchNorm already folded into the convs, weights in fp16).
 // Square index = row * 8 + col, row 0 = rank 1, col 0 = file a  (same as othello.py).
 // board: Int8Array(64), +1 / -1 = the two colours, 0 = empty.
 var Engine = (function () {
@@ -370,19 +382,6 @@ var Engine = (function () {
   function name(sq) { return "abcdefgh"[sq & 7] + ((sq >> 3) + 1); }
 
   // ---------------------------------------------------------------- network
-  var NB = null; // neighbour table: NB[p*9+k] = input position for 3x3 tap k at output p, or -1
-
-  function buildNeighbours() {
-    NB = new Int16Array(64 * 9);
-    for (var p = 0; p < 64; p++) {
-      var r = p >> 3, c = p & 7, k = 0;
-      for (var dr = -1; dr <= 1; dr++) for (var dc = -1; dc <= 1; dc++) {
-        var rr = r + dr, cc = c + dc;
-        NB[p * 9 + k++] = (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) ? rr * 8 + cc : -1;
-      }
-    }
-  }
-
   // fp16 blob (ArrayBuffer) -> Float32Array
   function decodeHalf(buf) {
     var h = new Uint16Array(buf), out = new Float32Array(h.length);
@@ -394,7 +393,6 @@ var Engine = (function () {
   }
 
   function Net(manifest, floats) {
-    if (!NB) buildNeighbours();
     var T = {};
     Object.keys(manifest.tensors).forEach(function (k) {
       var t = manifest.tensors[k], n = t.shape.reduce(function (a, b) { return a * b; }, 1);
@@ -405,23 +403,27 @@ var Engine = (function () {
     this.cache = { key: null, value: null };
   }
 
-  // 3x3 conv, zero padding: x Float32Array(cin*64) -> Float32Array(cout*64), bias per output channel
+  // 3x3 conv, zero padding: x Float32Array(cin*64) -> Float32Array(cout*64), bias per output channel.
+  // The input is copied into 10x10 planes with a zero border, so each of the 9 taps is a fixed offset and the inner
+  // loop has no bounds checks; outputs are accumulated on the same 10-wide grid (q = row*10 + col, cols 8-9 unused).
   function conv3(W, bias, x) {
     var cout = W.shape[0], cin = W.shape[1], w = W.w, y = new Float32Array(cout * 64);
+    var xp = new Float32Array(cin * 100), acc = new Float64Array(78), i, r, c, q;
+    for (i = 0; i < cin; i++) for (r = 0; r < 8; r++) for (c = 0; c < 8; c++) xp[i * 100 + r * 10 + 11 + c] = x[i * 64 + r * 8 + c];
     for (var o = 0; o < cout; o++) {
-      var yo = o * 64, bo = bias[o];
-      for (var p = 0; p < 64; p++) y[yo + p] = bo;
-      for (var i = 0; i < cin; i++) {
-        var xi = i * 64, wb = (o * cin + i) * 9;
-        for (var k = 0; k < 9; k++) {
-          var wk = w[wb + k];
-          if (wk === 0) continue;
-          for (var p2 = 0; p2 < 64; p2++) {
-            var q = NB[p2 * 9 + k];
-            if (q >= 0) y[yo + p2] += wk * x[xi + q];
-          }
+      acc.fill(0);
+      for (i = 0; i < cin; i++) {
+        var wb = (o * cin + i) * 9, b = i * 100;
+        var w0 = w[wb], w1 = w[wb + 1], w2 = w[wb + 2], w3 = w[wb + 3], w4 = w[wb + 4],
+          w5 = w[wb + 5], w6 = w[wb + 6], w7 = w[wb + 7], w8 = w[wb + 8];
+        for (q = 0; q < 78; q++) {
+          var t = b + q;
+          acc[q] += w0 * xp[t] + w1 * xp[t + 1] + w2 * xp[t + 2] + w3 * xp[t + 10] + w4 * xp[t + 11] +
+            w5 * xp[t + 12] + w6 * xp[t + 20] + w7 * xp[t + 21] + w8 * xp[t + 22];
         }
       }
+      var yo = o * 64, bo = bias[o];
+      for (r = 0; r < 8; r++) for (c = 0; c < 8; c++) y[yo + r * 8 + c] = acc[r * 10 + c] + bo;
     }
     return y;
   }
@@ -537,6 +539,51 @@ var Engine = (function () {
     return { sq: best, pwin: out.pwin[best], out: out };
   };
 
+  // ---------------------------------------------------------------- search
+  // Alpha-beta over the net in P(win) space, v(node) = max over moves of 1 - v(child), `depth` plies below the root.
+  // A leaf is valued by its best move's P(win); a forced pass counts as a ply; a finished game gets its exact result.
+  // Moves are tried in the order of the net's own scores. The values are those of endgame/search.py.
+  function finalValue(board, who) {
+    var c = count(board), d = who === 1 ? c.black - c.white : c.white - c.black;
+    return d > 0 ? 1 : d < 0 ? 0 : 0.5;
+  }
+
+  function byScore(legal, pwin) { return legal.slice().sort(function (a, b) { return pwin[b] - pwin[a]; }); }
+
+  // P(win) of `who` to move, searched `depth` plies; exact inside (alpha, beta), a bound outside it
+  Net.prototype.value = function (board, who, depth, alpha, beta) {
+    var legal = legalMoves(board, who), best = 0, i;
+    if (!legal.length) {
+      if (!legalMoves(board, -who).length) return finalValue(board, who);
+      return 1 - this.value(board, -who, Math.max(depth - 1, 0), 1 - beta, 1 - alpha);
+    }
+    var out = this.run(board, who);
+    if (depth === 0) {
+      for (i = 0; i < legal.length; i++) best = Math.max(best, out.pwin[legal[i]]);
+      return best;
+    }
+    legal = byScore(legal, out.pwin);
+    for (i = 0; i < legal.length && best < beta; i++) {
+      var v = 1 - this.value(play(board, legal[i], who).board, -who, depth - 1, 1 - beta, 1 - Math.max(alpha, best));
+      if (v > best) best = v;
+    }
+    return best;
+  };
+
+  // The root move with the highest searched P(win) (the net's favourite on ties). depth 0 = bestMove.
+  // Returns {sq, pwin} or null when `who` has no legal move.
+  Net.prototype.search = function (board, who, depth) {
+    if (!depth) return this.bestMove(board, who);
+    var out = this.run(board, who), best = -1, sq = -1;
+    if (!out.legal.length) return null;
+    var legal = byScore(out.legal, out.pwin);
+    for (var i = 0; i < legal.length; i++) {
+      var v = 1 - this.value(play(board, legal[i], who).board, -who, depth - 1, 0, 1 - Math.max(best, 0));
+      if (v > best) { best = v; sq = legal[i]; }
+    }
+    return { sq: sq, pwin: best };
+  };
+
   return {
     legalMoves: legalMoves, play: play, count: count, initialBoard: initialBoard, name: name,
     flipsFor: flipsFor, Net: Net, decodeHalf: decodeHalf
@@ -599,7 +646,7 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
   function newGame(human) {
     S = { board: Engine.initialBoard(), turn: 1, human: human, log: [], history: [], last: -1,
       flips: [], ai: null, over: false, msg: "", counted: false };
-    thinking = false;
+    thinking = false; aiJob++;
     render(); step();
   }
 
@@ -666,16 +713,52 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
     }, 30);
   }
 
+  // ---- the AI's search (depthBox.value plies in all, the last one being the net's own move scores) runs in a
+  // worker built from the engine source, so the page stays responsive; without workers it runs here.
+  var worker = null, jobs = {}, jobId = 0, aiJob = 0;
+  function workerMain() {
+    var wnet = null;
+    onmessage = function (e) {
+      var d = e.data;
+      if (d.manifest) { wnet = new Engine.Net(d.manifest, d.floats); return; }
+      var m = wnet.search(new Int8Array(d.board), d.who, d.depth);
+      postMessage({ id: d.id, m: m && { sq: m.sq, pwin: m.pwin } });
+    };
+  }
+  function startWorker(floats) {
+    try {
+      var src = document.getElementById("engine-js").textContent + "\n(" + workerMain + ")();";
+      worker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+      worker.onmessage = function (e) { var cb = jobs[e.data.id]; delete jobs[e.data.id]; if (cb) cb(e.data.m); };
+      worker.onerror = function () {  // fall back to the page for the job in flight and all later ones
+        worker = null;
+        Object.keys(jobs).forEach(function (id) { var j = jobs[id]; delete jobs[id]; j.fallback(); });
+      };
+      worker.postMessage({ manifest: MANIFEST, floats: floats });
+    } catch (e) { worker = null; }
+  }
+  function think(board, who, depth, cb) {
+    function here() { setTimeout(function () { cb(net.search(board, who, depth)); }, 0); }
+    if (!worker) { here(); return; }
+    var id = ++jobId;
+    jobs[id] = cb; cb.fallback = here;
+    worker.postMessage({ id: id, board: Array.from(board), who: who, depth: depth });
+  }
+
   function maybeAI() {
     if (S.over || S.turn !== -S.human || thinking) return;
     thinking = true; render();
-    setTimeout(function () {
-      var m = net.bestMove(S.board, S.turn);
-      thinking = false;
-      if (!m) { render(); return; }
-      S.ai = { sq: m.sq, pwin: m.pwin, who: S.turn };
-      doMove(m.sq);
-    }, 380);
+    var job = ++aiJob, t0 = Date.now();
+    think(S.board, S.turn, +depthBox.value - 1, function (m) {
+      // a short pause even when the answer is instant, so the reply does not land on top of the player's move
+      setTimeout(function () {
+        if (job !== aiJob) return;  // new game meanwhile
+        thinking = false;
+        if (!m) { render(); return; }
+        S.ai = { sq: m.sq, pwin: m.pwin, who: S.turn };
+        doMove(m.sq);
+      }, Math.max(0, 380 - (Date.now() - t0)));
+    });
   }
 
   function onCell(e) {
@@ -699,6 +782,10 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
   ownerBox.checked = load("apple-othello-owner", true);
   hintsBox.addEventListener("change", function () { save("apple-othello-hints", hintsBox.checked); render(); });
   ownerBox.addEventListener("change", function () { save("apple-othello-owner", ownerBox.checked); render(); });
+  var depthBox = document.getElementById("depth");
+  depthBox.value = String(load("apple-othello-depth", 3));
+  if (!depthBox.value) depthBox.value = "3";
+  depthBox.addEventListener("change", function () { save("apple-othello-depth", +depthBox.value); });
 
   function pct(p) { return (100 * p).toFixed(1) + "%"; }
 
@@ -877,7 +964,9 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
     loadText = "正在加载网络… " + Math.floor(100 * f) + "%";
     document.getElementById("status").textContent = loadText;
   }).then(function (buf) {
-    net = new Engine.Net(MANIFEST, Engine.decodeHalf(buf));
+    var floats = Engine.decodeHalf(buf);
+    net = new Engine.Net(MANIFEST, floats);
+    startWorker(floats);
     render(); step();
   }).catch(function () {
     loadText = "网络权重加载失败，请刷新重试（已下载的部分不会重新下载）。";
