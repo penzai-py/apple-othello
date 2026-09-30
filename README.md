@@ -3,7 +3,7 @@
 在线对弈：https://penzai-py.github.io/apple-othello/
 
 一个从零自对弈训练出的翻转棋 AI。翻转棋规则和一个 161 万参数的 KataGo 式卷积网络（带全局池化）都用
-JavaScript 在浏览器里运行，不需要服务器。`index.html` 是页面，`weights.bin` 是 fp16 网络权重。
+JavaScript 在浏览器里运行，不需要服务器。`index.html` 是页面，`weights-<hash>-NN.bin` 是切成 256 KB 小块的 fp16 网络权重（分块下载，某一块卡住只重试那一块）。
 
 AI 每步只看网络对每个落点的胜率估计，选最高的，不做搜索。页面同时显示：
 
