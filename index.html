@@ -295,7 +295,7 @@
           <button class="btn" id="undo" type="button">悔棋</button>
         </div>
         <label class="toggle"><input type="checkbox" id="owner" checked><span>显示终局归属判断</span></label>
-        <label class="toggle"><input type="checkbox" id="hints"><span>显示 AI 对你每个落点的胜率估计</span></label>
+        <label class="toggle"><input type="checkbox" id="hints" checked><span>显示 AI 对你每个落点的胜率估计</span></label>
       </div>
 
       <div>
@@ -695,7 +695,7 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
     render(); step();
   });
   var hintsBox = document.getElementById("hints"), ownerBox = document.getElementById("owner");
-  hintsBox.checked = load("apple-othello-hints", false);
+  hintsBox.checked = load("apple-othello-hints", true);
   ownerBox.checked = load("apple-othello-owner", true);
   hintsBox.addEventListener("change", function () { save("apple-othello-hints", hintsBox.checked); render(); });
   ownerBox.addEventListener("change", function () { save("apple-othello-owner", ownerBox.checked); render(); });
