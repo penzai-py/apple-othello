@@ -193,7 +193,8 @@
     height: 14px; border-radius: 7px; overflow: hidden; background: var(--disc-white);
     box-shadow: inset 0 0 0 1px #b8b3a6;
   }
-  .wb-fill { height: 100%; width: 50%; background: var(--disc-black); transition: width 300ms ease; }
+  .wb-fill { height: 100%; width: 50%; background: var(--disc-black); transition: width 300ms ease, opacity 200ms ease; }
+  .winbar.pending .wb-fill, .winbar.pending .wb-labels b { opacity: 0.45; }
   .wb-margin { font-size: 13px; color: var(--muted); }
   .wb-margin b { color: var(--ink); font-family: var(--f-mono); font-weight: 500; }
   @media (prefers-reduced-motion: reduce) { .disc.flip, .disc.place { animation: none; } }
@@ -317,7 +318,7 @@
 
   <section class="about">
     <p><b>它是怎么学会的。</b>KataGo 式的残差卷积网络，带全局池化，从随机权重开始只靠自己和自己下棋学习。先在剩 10 个空格起用精确求解器给出完美对弈的胜负，把它作为这盘棋每一步的标签，训练到不再进步；再改用时序差分，让每个落点的标签等于对手最好应对之后的胜率，一直训练到测试集上的误差不再下降。</p>
-    <p><b>屏幕上的数字。</b>胜率条是 AI 对当前局面双方胜率的估计。每格上的小方块是它对这一格"终局时归谁"的判断：黑方块归黑，白方块归白，越不透明越确定（叠在棋子上的方块颜色和棋子不同，就是它认为这颗子会被翻过去）；把 64 格的判断加起来，就是预计的终局子差。落点提示是"在这里落子后你的胜率"，金色是它认为最好的一步。这些都是网络直接看一眼（1 层）的判断。</p>
+    <p><b>屏幕上的数字。</b>胜率条是 AI 按所选搜索深度（默认 3 层）对当前局面双方胜率的估计，搜索完成前先显示网络直接看一眼的估计（颜色较浅）。每格上的小方块是它对这一格"终局时归谁"的判断：黑方块归黑，白方块归白，越不透明越确定（叠在棋子上的方块颜色和棋子不同，就是它认为这颗子会被翻过去）；把 64 格的判断加起来，就是预计的终局子差。落点提示是"在这里落子后你的胜率"，金色是它认为最好的一步。终局归属、预计子差和落点提示都是网络直接看一眼（1 层）的判断。</p>
     <p><b>AI 怎么走棋。</b>网络本身已经会估计"走这一步之后的胜率"，这是 1 层。3 层就是把自己的每一步、对手的每一种应对都摆出来，再让网络估计自己下一步的胜率，按双方都选最好的一步倒推回来，选胜率最高的一步（alpha-beta 剪枝，每步约 30 次网络评估）。下面是默认 3 层时对几种固定策略的得分。</p>
     <div class="stats" aria-label="AI 的对局成绩">
       <span>对 4 层 alpha-beta 搜索</span><span>98.1%</span>
@@ -682,7 +683,7 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
     var a = { key: posKey() }, ownB = new Float32Array(64), margin = 0, s;
     if (S.over) {
       var c = Engine.count(S.board);
-      a.pb = c.black > c.white ? 1 : c.black < c.white ? 0 : 0.5;
+      a.pb = a.pbS = c.black > c.white ? 1 : c.black < c.white ? 0 : 0.5;
       for (s = 0; s < 64; s++) ownB[s] = S.board[s] === 1 ? 1 : S.board[s] === -1 ? 0 : 0.5;
     } else {
       var out = net.run(S.board, S.turn), best = 0;
@@ -699,15 +700,33 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
   // Evaluate the new position off the click handler (so the move shows at once), then let the AI move.
   function step() {
     if (!net || analysing) return;
-    if (analysis && analysis.key === posKey()) { maybeAI(); return; }
+    if (analysis && analysis.key === posKey()) { searchBar(); maybeAI(); return; }
     analysing = true;
     setTimeout(function () {
       analysis = analyse();
       analysing = false;
       render();
       if (analysis.key !== posKey()) { step(); return; }  // the position changed meanwhile (undo / new game)
+      searchBar();
       maybeAI();
     }, 30);
+  }
+
+  // The win bar shows P(win) searched at the AI's depth (analysis.pbS, from Black's side). On the AI's turn its move
+  // search supplies it (maybeAI); on the player's turn a value search runs in the worker. Until then the bar shows
+  // the net's own estimate, dimmed.
+  function searchBar() {
+    var a = analysis, depth = +depthBox.value - 1, who = S.turn;
+    if (!a || a.key !== posKey() || S.over || a.depth === depth) return;
+    a.depth = depth; a.pbS = null;
+    if (!depth) { a.pbS = a.pb; render(); return; }
+    render();
+    if (who === -S.human) return;
+    think(S.board, who, depth, function (m) {
+      if (analysis !== a || a.depth !== depth) return;  // position or depth changed meanwhile
+      a.pbS = who === 1 ? m.pwin : 1 - m.pwin;
+      render();
+    }, "value");
   }
 
   // ---- the AI's search (depthBox.value plies in all, the last one being the net's own move scores) runs in a
@@ -718,7 +737,8 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
     onmessage = function (e) {
       var d = e.data;
       if (d.manifest) { wnet = new Engine.Net(d.manifest, d.floats); return; }
-      var m = wnet.search(new Int8Array(d.board), d.who, d.depth);
+      var b = new Int8Array(d.board);
+      var m = d.kind === "value" ? { sq: -1, pwin: wnet.value(b, d.who, d.depth, 0, 1) } : wnet.search(b, d.who, d.depth);
       postMessage({ id: d.id, m: m && { sq: m.sq, pwin: m.pwin } });
     };
   }
@@ -734,19 +754,28 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
       worker.postMessage({ manifest: MANIFEST, floats: floats });
     } catch (e) { worker = null; }
   }
-  function think(board, who, depth, cb) {
-    function here() { setTimeout(function () { cb(net.search(board, who, depth)); }, 0); }
+  // kind "value": {pwin} = searched P(win) of `who` to move; otherwise the best move {sq, pwin} (or null)
+  function think(board, who, depth, cb, kind) {
+    function here() {
+      setTimeout(function () {
+        cb(kind === "value" ? { sq: -1, pwin: net.value(board, who, depth, 0, 1) } : net.search(board, who, depth));
+      }, 0);
+    }
     if (!worker) { here(); return; }
     var id = ++jobId;
     jobs[id] = cb; cb.fallback = here;
-    worker.postMessage({ id: id, board: Array.from(board), who: who, depth: depth });
+    worker.postMessage({ id: id, board: Array.from(board), who: who, depth: depth, kind: kind });
   }
 
   function maybeAI() {
     if (S.over || S.turn !== -S.human || thinking) return;
     thinking = true; render();
-    var job = ++aiJob, t0 = Date.now();
-    think(S.board, S.turn, +depthBox.value - 1, function (m) {
+    var job = ++aiJob, t0 = Date.now(), who = S.turn, a = analysis, depth = +depthBox.value - 1;
+    think(S.board, who, depth, function (m) {
+      if (job === aiJob && m && a && a.key === posKey() && a.depth === depth) {  // the bar's searched value
+        a.pbS = who === 1 ? m.pwin : 1 - m.pwin;
+        render();
+      }
       // a short pause even when the answer is instant, so the reply does not land on top of the player's move
       setTimeout(function () {
         if (job !== aiJob) return;  // new game meanwhile
@@ -782,7 +811,7 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
   var depthBox = document.getElementById("depth");
   depthBox.value = String(load("apple-othello-depth", 3));
   if (!depthBox.value) depthBox.value = "3";
-  depthBox.addEventListener("change", function () { save("apple-othello-depth", +depthBox.value); });
+  depthBox.addEventListener("change", function () { save("apple-othello-depth", +depthBox.value); if (!thinking) searchBar(); });
 
   function pct(p) { return (100 * p).toFixed(1) + "%"; }
 
@@ -847,11 +876,15 @@ var WEIGHT_PARTS = [["weights-2fe989cd-00.bin", 262144], ["weights-2fe989cd-01.b
 
     // win bar and expected final margin (sum of the per-square ownership judgements)
     var mEl = document.getElementById("wb-margin");
+    var pending = !fresh || fresh.pbS == null;
+    document.getElementById("winbar").classList.toggle("pending", !!net && pending);  // dim a stale value too
     if (fresh) {
-      document.getElementById("wb-b").textContent = pct(fresh.pb);
-      document.getElementById("wb-w").textContent = pct(1 - fresh.pb);
-      document.getElementById("wb-fill").style.width = (100 * fresh.pb).toFixed(1) + "%";
-      document.getElementById("wb-track").setAttribute("aria-label", "AI 估计的胜率：黑 " + pct(fresh.pb) + "，白 " + pct(1 - fresh.pb));
+      var pb = pending ? fresh.pb : fresh.pbS;
+      document.getElementById("wb-b").textContent = pct(pb);
+      document.getElementById("wb-w").textContent = pct(1 - pb);
+      document.getElementById("wb-fill").style.width = (100 * pb).toFixed(1) + "%";
+      document.getElementById("wb-track").setAttribute("aria-label", "AI 估计的胜率" + (pending ? "（搜索中）" : "") +
+        "：黑 " + pct(pb) + "，白 " + pct(1 - pb));
       var mg = fresh.margin, mt = Math.abs(mg).toFixed(1);
       mEl.innerHTML = (S.over ? "终局子差：" : "预计终局：") +
         (mt === "0.0" ? "打平" : (mg > 0 ? "黑" : "白") + "领先约 <b>" + mt + "</b> 子");
